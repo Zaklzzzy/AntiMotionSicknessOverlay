@@ -9,27 +9,23 @@
 POINT points[POINT_COUNT];
 POINT oldPoints[POINT_COUNT]; // Старые позиции точек для очистки
 RECT pointBounds[POINT_COUNT]; // Границы движения каждой точки
+POINT startPositions[POINT_COUNT]; // Стартовые позиции точек
 
 // Смещение камеры
-HHOOK mouseHook = NULL; // Хук для отслеживания мыши
 float cameraOffsetX = 0.0f;
 float cameraOffsetY = 0.0f;
-POINT lastMousePos = { 0, 0 };
 
-// Работа хука мыши
-LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION) {
-        MSLLHOOKSTRUCT* mouseInfo = (MSLLHOOKSTRUCT*)lParam;
+// Регистрация Raw Input для отслеживания движения мыши
+void RegisterRawInput(HWND hwnd) {
+    RAWINPUTDEVICE rid;
+    rid.usUsagePage = 0x01; // Генерация ввода от мыши
+    rid.usUsage = 0x02;     // Устройство мыши
+    rid.dwFlags = RIDEV_INPUTSINK; // Направление ввода в окно
+    rid.hwndTarget = hwnd;
 
-        if (wParam == WM_MOUSEMOVE) {
-            // Вычисляем смещение
-            cameraOffsetX = (float)(mouseInfo->pt.x - lastMousePos.x) * 0.5f;
-            cameraOffsetY = (float)(mouseInfo->pt.y - lastMousePos.y) * 0.5f;
-
-            lastMousePos = mouseInfo->pt;
-        }
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) {
+        MessageBox(hwnd, L"Failed to register raw input", L"Error", MB_OK | MB_ICONERROR);
     }
-    return CallNextHookEx(mouseHook, nCode, wParam, lParam);
 }
 
 // Функция для инициализации точек
@@ -42,6 +38,7 @@ void InitializePoints(int width, int height) {
     for (int i = 0; i < POINT_COUNT / 2; i++) {
         points[i].x = margin;
         points[i].y = i * spacing + margin;
+        startPositions[i] = points[i]; // Сохраняем стартовые позиции
         oldPoints[i] = points[i];
 
         // Задаём границы
@@ -55,6 +52,7 @@ void InitializePoints(int width, int height) {
     for (int i = POINT_COUNT / 2; i < POINT_COUNT; i++) {
         points[i].x = width - margin;
         points[i].y = (i - POINT_COUNT / 2) * spacing + margin;
+        startPositions[i] = points[i]; // Сохраняем стартовые позиции
         oldPoints[i] = points[i];
 
         // Задаём границы
@@ -68,6 +66,23 @@ void InitializePoints(int width, int height) {
 // Обработчик окна
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+    case WM_INPUT: { // Обработка данных Raw Input
+        UINT dwSize;
+        GetRawInputData((HRAWINPUT)lParam, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER));
+        LPBYTE lpb = new BYTE[dwSize];
+        if (lpb == NULL) return 0;
+
+        if (GetRawInputData((HRAWINPUT)lParam, RID_INPUT, lpb, &dwSize, sizeof(RAWINPUTHEADER)) == dwSize) {
+            RAWINPUT* raw = (RAWINPUT*)lpb;
+            if (raw->header.dwType == RIM_TYPEMOUSE && raw->data.mouse.usFlags == MOUSE_MOVE_RELATIVE) {
+                // Относительное движение мыши
+                cameraOffsetX = (float)raw->data.mouse.lLastX * 0.5f;
+                cameraOffsetY = (float)raw->data.mouse.lLastY * 0.5f;
+            }
+        }
+        delete[] lpb;
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -100,6 +115,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             points[i].x -= (int)cameraOffsetX;
             points[i].y -= (int)cameraOffsetY;
 
+            // Возврат точки к стартовой позиции
+            float returnSpeed = 0.1f; // Коэффициент скорости возврата
+            points[i].x += (int)((startPositions[i].x - points[i].x) * returnSpeed);
+            points[i].y += (int)((startPositions[i].y - points[i].y) * returnSpeed);
+
             // Проверяем границы экрана
             if (points[i].x < 0) points[i].x = 0;
             if (points[i].x > GetSystemMetrics(SM_CXSCREEN)) points[i].x = GetSystemMetrics(SM_CXSCREEN);
@@ -120,10 +140,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         int height = HIWORD(lParam);
         InitializePoints(width, height);
         InvalidateRect(hwnd, NULL, TRUE); // Перерисовать окно
-        return 0;
-    }
-    case WM_MOUSEMOVE: {
-        OutputDebugString(L"Mouse moved!\n");
         return 0;
     }
     case WM_DESTROY: {
@@ -159,11 +175,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return -1;
     }
 
-    mouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, NULL, 0);
-    if (!mouseHook) {
-        MessageBox(NULL, L"Failed to install mouse hook", L"Error", MB_OK | MB_ICONERROR);
-        return -1;
-    }
+    // Регистрация Raw Input
+    RegisterRawInput(hwnd);
 
     // Устанавливаем прозрачный фон
     SetLayeredWindowAttributes(hwnd, 0, 255, LWA_COLORKEY);
@@ -183,10 +196,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
-    }
-
-    if (mouseHook) {
-        UnhookWindowsHookEx(mouseHook);
     }
 
     return 0;
